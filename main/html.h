@@ -1,4 +1,4 @@
-// --- Web page (PROGMEM) --- (same UI as before, kept for brevity)
+// --- Web page (PROGMEM) ---
 const char PAGE[] PROGMEM = R"HTML(
 <!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
 <title>ESP8266 — Compressor Controller</title>
@@ -40,7 +40,7 @@ const char PAGE[] PROGMEM = R"HTML(
       <div class="title">
         <svg class="svg" viewBox="0 0 64 64"><g id="compRotor"><rect x="10" y="12" rx="6" ry="6" width="44" height="40" fill="#3740b8"/><rect x="16" y="18" rx="4" ry="4" width="32" height="18" fill="#20265f"/><circle cx="24" cy="45" r="6" fill="#0e1022" stroke="#7e8aff" stroke-width="2"/><circle cx="40" cy="45" r="6" fill="#0e1022" stroke="#7e8aff" stroke-width="2"/></g></svg>
         <div><div>Compressor (Pump)</div><div class="small">Restart delay: <b id="delayLabel">120</b> s</div>
-        <div class="status"><span id="compPill" class="pill off">OFF</span> • <span class="mono" id="cd">--</span> s</div></div>
+        <div class="status"><span id="compPill" class="pill off">OFF</span> • <span class="mono" id="cd">--</span></div></div>
       </div>
       <div style="margin-top:8px" class="row"><button class="btn" id="compBtn">Toggle</button>
       <div style="display:flex;align-items:center;gap:10px"><div class="small">Mode</div><div id="modeSwitch" class="switch"><div class="knob"></div></div><div id="mode" class="small">Cooling</div></div></div>
@@ -94,7 +94,6 @@ const char PAGE[] PROGMEM = R"HTML(
 
 <script>
 (function(){
-  // get elements explicitly
   const sysPill = document.getElementById('sysPill');
   const sysBtn  = document.getElementById('sysBtn');
   const compBtn = document.getElementById('compBtn');
@@ -120,7 +119,6 @@ const char PAGE[] PROGMEM = R"HTML(
   const compRotor = document.getElementById('compRotor');
   const fanBlades = document.getElementById('fanBlades');
 
-  // attach listeners
   sysBtn.addEventListener('click', ()=>{ fetch('/toggleSystem').then(()=>setTimeout(update,200)); });
   compBtn.addEventListener('click', ()=>{ fetch('/toggleComp').then(()=>setTimeout(update,200)); });
   fanBtn.addEventListener('click', ()=>{ fetch('/toggleFan').then(()=>setTimeout(update,200)); });
@@ -133,11 +131,11 @@ const char PAGE[] PROGMEM = R"HTML(
 
   function setCardState(el, state){ el.className='pill ' + (state==='ON'?'on':state==='WAIT'?'wait':'off'); }
   function setDisabled(el, dis){ if(!el) return; el.disabled = !!dis; if(dis) el.setAttribute('disabled',''); else el.removeAttribute('disabled'); }
-  function setTempColor(el, bad){ el.className = bad ? 'temp tempBAD' : 'temp tempOK'; }
 
   function update(){
     fetch('/status').then(r=>r.json()).then(d=>{
       ip.textContent = d.ip; rssi.textContent = d.rssi; uptime.textContent = d.uptime;
+
       sysPill.textContent = d.system; setCardState(sysPill, d.system==='ON'?'ON':'OFF');
       const sysOff = d.system!=='ON';
       setDisabled(compBtn, sysOff); setDisabled(fanBtn, sysOff);
@@ -145,55 +143,40 @@ const char PAGE[] PROGMEM = R"HTML(
       t1El.textContent = d.t1; t2El.textContent = d.t2;
       cutComp.textContent = d.compShutdown; cutAir.textContent = d.airSetpoint;
       delayLabel.textContent = d.delay;
+      cd.textContent = "";
 
       if (document.activeElement !== setT) setT.value = d.airSetpoint;
       if (document.activeElement !== setC) setC.value = d.compShutdown;
       if (document.activeElement !== setH) setH.value = d.hyst;
       if (document.activeElement !== setD) setD.value = d.delay;
 
-      setCardState(compPill, d.compState);
-      setCardState(fanPill, d.fan==='ON'?'ON':'OFF');
+      compPill.textContent = d.compState;
+      if (d.compState === "ON") {
+        setCardState(compPill, "ON");
+        compRotor.classList.add("pulse");
+        setDisabled(compBtn, false);
+      } else if (d.compState === "WAIT") {
+        setCardState(compPill, "WAIT");
+        compRotor.classList.remove("pulse");
+        setDisabled(compBtn, true);
+        cd.textContent = d.countdown + "s";
+      } else {
+        setCardState(compPill, "OFF");
+        compRotor.classList.remove("pulse");
+        setDisabled(compBtn, sysOff);
+      }
 
-      if (d.compState==='ON') compRotor.classList.add('pulse'); else compRotor.classList.remove('pulse');
-      if (d.fan==='ON') fanBlades.classList.add('spin'); else fanBlades.classList.remove('spin');
+      fanPill.textContent = d.fan;
+      setCardState(fanPill, d.fan==='ON'?'ON':'OFF');
+      if (d.fan==='ON') fanBlades.classList.add("spin"); else fanBlades.classList.remove("spin");
 
       mode.textContent = d.mode;
       if (d.mode==='Heating') modeSwitch.classList.add('on'); else modeSwitch.classList.remove('on');
-    }).catch(err=>{
-      console.log('status fetch err', err);
     });
   }
 
   setInterval(update, 2000);
   update();
-
-  // history/chart
-  let lastHistAt = 0;
-  function fetchHistory(){ fetch('/history').then(r=>r.json()).then(drawChart); lastHistAt = Date.now(); }
-  setInterval(()=>{ if (Date.now()-lastHistAt>60000) fetchHistory(); }, 10000);
-  fetchHistory();
-
-  function drawChart(data){
-    const points = data.points || [];
-    const cvs = document.getElementById('chart'); const dpr = (window.devicePixelRatio||1);
-    const box = cvs.getBoundingClientRect(); cvs.width = Math.floor(box.width*dpr); cvs.height = Math.floor(box.height*dpr);
-    const ctx = cvs.getContext('2d'); ctx.clearRect(0,0,cvs.width,cvs.height); ctx.lineWidth = 2*dpr; ctx.font = (12*dpr)+'px monospace';
-    const y1=[], y2=[];
-    for (let i=0;i<points.length;i++){ y1.push(points[i].t1); y2.push(points[i].t2); }
-    let minY=Infinity, maxY=-Infinity; function upd(v){ if(v==null) return; if(v<minY) minY=v; if(v>maxY) maxY=v; }
-    y1.forEach(upd); y2.forEach(upd);
-    if (!isFinite(minY)||!isFinite(maxY)){ minY=0; maxY=50; } if (minY===maxY){ minY-=1; maxY+=1; }
-    const l=40*dpr, r=10*dpr, t=10*dpr, b=24*dpr; const W=cvs.width, H=cvs.height;
-    ctx.strokeStyle='#2b2f55'; ctx.beginPath(); ctx.moveTo(l,t); ctx.lineTo(l,H-b); ctx.lineTo(W-r,H-b); ctx.stroke();
-    ctx.fillStyle='#b7bddb'; const ticks=5;
-    for (let i=0;i<=ticks;i++){ const yy=H-b-(i/ticks)*(H-b-t); const val=(minY+(i/ticks)*(maxY-minY)).toFixed(0); ctx.fillText(val,4*dpr,yy+4*dpr); ctx.strokeStyle='#21244a'; ctx.beginPath(); ctx.moveTo(l,yy); ctx.lineTo(W-r,yy); ctx.stroke(); }
-    function mapX(i){ if(points.length<=1) return l; return l + (i/(points.length-1))*(W-l-r); }
-    function mapY(v){ return H-b - ((v-minY)/(maxY-minY))*(H-b-t); }
-    function drawSeries(arr, color){ ctx.strokeStyle=color; ctx.beginPath(); let started=false; for(let i=0;i<arr.length;i++){ const v=arr[i]; if(v==null){ started=false; continue; } const x=mapX(i), y=mapY(v); if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y); } ctx.stroke(); }
-    drawSeries(y1,'#ff6b6b'); drawSeries(y2,'#7dd3fc');
-    for (let h=0; h<=24; h+=2){ const i = Math.round((h/24)*(points.length-1)); const x=mapX(i); ctx.fillStyle='#b7bddb'; ctx.fillText((24-h)+'h', x-10*dpr, H-6*dpr); ctx.strokeStyle='#21244a'; ctx.beginPath(); ctx.moveTo(x,H-b); ctx.lineTo(x,t); ctx.stroke(); }
-  }
-
 })();
 </script>
 </body></html>

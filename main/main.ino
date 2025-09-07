@@ -1,71 +1,13 @@
-/* Fixed full sketch
-   - GPIO: ONE_WIRE_BUS = 14 (D5), FAN_PIN = 5 (D1), COMP_PIN = 4 (D2)
-   - DS18B20 x2 (getTempCByIndex)
-   - 24h history (288 points, step 5 min)
-   - Master ON/OFF, Heating/Cooling, hysteresis, delaySeconds editable
-   - Settings persisted to EEPROM
-   - Fixed JS: always use document.getElementById; listeners attached explicitly
-   - Serial debug messages in handlers
-*/
-
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "wifi.h" // WiFi credentials
-#include "html.h" // Web page
+#include "wifi.h"   // ssid, password
+#include "html.h"   // веб-сторінка
+#include "config.h" // конфігурація
 
-
-// --- Pins (GPIO numbers) ---
-#define ONE_WIRE_BUS 14   // D5
-#define FAN_PIN 5         // D1
-#define COMP_PIN 4        // D2
-
-// --- Sensors ---
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
-
-// --- Web server ---
-ESP8266WebServer server(80);
-
-// --- History ---
-const uint16_t HIST_N = 288;
-int16_t histT1x10[HIST_N];
-int16_t histT2x10[HIST_N];
-uint16_t histCount = 0;
-uint16_t histHead  = 0;
-unsigned long nextSampleMs = 0;
-
-// --- EEPROM config ---
-#define EEPROM_SIZE 512
-#define CONFIG_MAGIC 0xC0DEC0DEUL
-
-struct Config {
-  uint32_t magic;
-  float airSetpoint;
-  float compShutdownTemp;
-  float hysteresis;
-  uint16_t delaySeconds;
-  uint8_t heatingMode;   // 0=cooling,1=heating
-  uint8_t systemEnabled; // 0=off,1=on
-  uint8_t reserved[5];
-};
-Config cfg;
-
-// runtime mirrors
-float airSetpoint = 30.0;
-float compShutdownTemp = 60.0;
-float hysteresis = 0.5;
-uint16_t delaySeconds = 120;
-bool heatingMode = false;
-bool systemEnabled = true;
-
-unsigned long compStopTime = 0;
-bool fanState = false;
-bool compState = false;
-
-// helpers
+// --- Helpers ---
 inline void comp_on(){ digitalWrite(COMP_PIN, LOW); compState = true; Serial.println("COMP ON"); }
 inline void comp_off(){ digitalWrite(COMP_PIN, HIGH); compState = false; Serial.println("COMP OFF"); }
 inline bool comp_is_on(){ return compState; }
@@ -95,7 +37,7 @@ unsigned long waitRemainingMs(){
   return need - elapsed;
 }
 
-// EEPROM
+// --- EEPROM ---
 void saveConfig(){
   cfg.magic = CONFIG_MAGIC;
   cfg.airSetpoint = airSetpoint;
@@ -108,27 +50,24 @@ void saveConfig(){
   EEPROM.put(0, cfg);
   EEPROM.commit();
   delay(5);
-  Serial.println("Config saved to EEPROM");
+  Serial.println("Config saved");
 }
 bool loadConfig(){
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(0, cfg);
   if (cfg.magic != CONFIG_MAGIC) return false;
-  // sanity
   if (!isfinite(cfg.airSetpoint) || !isfinite(cfg.compShutdownTemp) || !isfinite(cfg.hysteresis)) return false;
   if (cfg.delaySeconds < 5 || cfg.delaySeconds > 3600) return false;
-  // apply
   airSetpoint = cfg.airSetpoint;
   compShutdownTemp = cfg.compShutdownTemp;
   hysteresis = cfg.hysteresis;
   delaySeconds = cfg.delaySeconds;
   heatingMode = (cfg.heatingMode != 0);
   systemEnabled = (cfg.systemEnabled != 0);
-  Serial.println("Config loaded from EEPROM");
   return true;
 }
 
-// History
+// --- History ---
 void historyInit(){
   for (uint16_t i=0;i<HIST_N;i++){ histT1x10[i]=INT16_MIN; histT2x10[i]=INT16_MIN; }
   histCount=0; histHead=0;
@@ -168,8 +107,6 @@ void sendHistoryJSON(){
   server.sendContent("]}");
 }
 
-
-
 // --- Handlers ---
 void handleRoot(){ server.send_P(200, "text/html", PAGE); }
 
@@ -180,11 +117,11 @@ void handleStatus(){
   float t1 = isnan(rt1) ? -127.0f : rt1;
   float t2 = isnan(rt2) ? -127.0f : rt2;
 
-  String compState;
-  if (!systemEnabled) compState = "OFF";
-  else if (comp_is_on()) compState = "ON";
-  else if (waitRemainingMs() > 0) compState = "WAIT";
-  else compState = "OFF";
+  String compS;
+  if (!systemEnabled) compS = "OFF";
+  else if (comp_is_on()) compS = "ON";
+  else if (waitRemainingMs() > 0) compS = "WAIT";
+  else compS = "OFF";
 
   String json = "{";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
@@ -199,7 +136,7 @@ void handleStatus(){
   json += "\"delay\":\"" + String(delaySeconds) + "\",";
   json += "\"countdown\":\"" + String(waitRemainingMs()/1000) + "\",";
   json += "\"fan\":\"" + String((fan_is_on() && systemEnabled) ? "ON" : "OFF") + "\",";
-  json += "\"compState\":\"" + compState + "\",";
+  json += "\"compState\":\"" + compS + "\",";
   json += "\"mode\":\"" + String(heatingMode ? "Heating" : "Cooling") + "\"";
   json += "}";
   server.send(200, "application/json", json);
@@ -207,63 +144,28 @@ void handleStatus(){
 
 void handleHistory(){ sendHistoryJSON(); }
 
-void handleSetTemp(){ 
-  if (server.hasArg("t")) {
-    airSetpoint = server.arg("t").toFloat();
-    cfg.airSetpoint = airSetpoint; saveConfig(); Serial.printf("Set airSetpoint=%0.1f\n", airSetpoint);
-  }
-  server.send(200,"text/plain","OK");
-}
-void handleSetCompTemp(){
-  if (server.hasArg("c")) {
-    compShutdownTemp = server.arg("c").toFloat();
-    cfg.compShutdownTemp = compShutdownTemp; saveConfig(); Serial.printf("Set compShutdown=%0.1f\n", compShutdownTemp);
-  }
-  server.send(200,"text/plain","OK");
-}
-void handleSetHyst(){
-  if (server.hasArg("h")) {
-    hysteresis = server.arg("h").toFloat();
-    cfg.hysteresis = hysteresis; saveConfig(); Serial.printf("Set hyst=%0.1f\n", hysteresis);
-  }
-  server.send(200,"text/plain","OK");
-}
-void handleSetDelay(){
-  if (server.hasArg("d")) {
-    int d = server.arg("d").toInt(); if (d < 5) d = 5; if (d > 3600) d = 3600;
-    delaySeconds = (uint16_t)d; cfg.delaySeconds = delaySeconds; saveConfig(); Serial.printf("Set delay=%u\n", delaySeconds);
-  }
-  server.send(200,"text/plain","OK");
-}
+void handleSetTemp(){ if (server.hasArg("t")) { airSetpoint = server.arg("t").toFloat(); cfg.airSetpoint = airSetpoint; saveConfig(); } server.send(200,"text/plain","OK"); }
+void handleSetCompTemp(){ if (server.hasArg("c")) { compShutdownTemp = server.arg("c").toFloat(); cfg.compShutdownTemp = compShutdownTemp; saveConfig(); } server.send(200,"text/plain","OK"); }
+void handleSetHyst(){ if (server.hasArg("h")) { hysteresis = server.arg("h").toFloat(); cfg.hysteresis = hysteresis; saveConfig(); } server.send(200,"text/plain","OK"); }
+void handleSetDelay(){ if (server.hasArg("d")) { int d = server.arg("d").toInt(); if (d<5) d=5; if (d>3600) d=3600; delaySeconds=d; cfg.delaySeconds=d; saveConfig(); } server.send(200,"text/plain","OK"); }
 
-void handleToggleMode(){
-  heatingMode = !heatingMode; cfg.heatingMode = heatingMode ? 1 : 0; saveConfig();
-  Serial.printf("Toggle mode -> %s\n", heatingMode ? "Heating":"Cooling");
-  server.send(200,"text/plain","OK");
-}
-void handleToggleFan(){
-  Serial.println("HTTP /toggleFan");
-  if (!systemEnabled){ fan_off(); server.send(200,"text/plain","OFF"); return; }
-  fan_is_on() ? fan_off() : fan_on();
-  server.send(200,"text/plain","OK");
-}
+void handleToggleMode(){ heatingMode = !heatingMode; cfg.heatingMode = heatingMode ? 1:0; saveConfig(); server.send(200,"text/plain","OK"); }
+void handleToggleFan(){ if (!systemEnabled){ fan_off(); server.send(200,"text/plain","OFF"); return; } fan_is_on()?fan_off():fan_on(); server.send(200,"text/plain","OK"); }
 void handleToggleComp(){
-  Serial.println("HTTP /toggleComp");
   if (!systemEnabled){ comp_off(); compStopTime = millis(); server.send(200,"text/plain","OFF"); return; }
   if (comp_is_on()){ comp_off(); compStopTime = millis(); }
-  else if (waitRemainingMs() == 0){ comp_on(); }
+  else if (waitRemainingMs()==0){ comp_on(); }
   server.send(200,"text/plain","OK");
 }
 void handleToggleSystem(){
-  Serial.println("HTTP /toggleSystem");
   systemEnabled = !systemEnabled;
-  cfg.systemEnabled = systemEnabled ? 1 : 0;
+  cfg.systemEnabled = systemEnabled ? 1:0;
   if (!systemEnabled){ comp_off(); compStopTime = millis(); fan_off(); }
   saveConfig();
   server.send(200,"text/plain", systemEnabled? "ON":"OFF");
 }
 
-// control
+// --- Control Loop ---
 void controlLoop(){
   historyTick();
 
@@ -274,8 +176,8 @@ void controlLoop(){
   }
 
   sensors.requestTemperatures();
-  float t1 = safeReadC(sensors.getTempCByIndex(0)); // compressor
-  float t2 = safeReadC(sensors.getTempCByIndex(1)); // air
+  float t1 = safeReadC(sensors.getTempCByIndex(0));
+  float t2 = safeReadC(sensors.getTempCByIndex(1));
 
   bool delayOver  = (waitRemainingMs() == 0);
   bool compTooHot = (!isnan(t1) && t1 > compShutdownTemp);
@@ -294,7 +196,7 @@ void controlLoop(){
   if (comp_is_on()){
     if (compTooHot || !wantOn){
       comp_off();
-      compStopTime = millis();
+      compStopTime = millis();   // 🔥 запуск таймера при кожному виключенні
     }
   } else {
     if (delayOver && wantOn && !compTooHot){
@@ -303,10 +205,9 @@ void controlLoop(){
   }
 }
 
-// setup / loop
+// --- Setup / Loop ---
 void setup(){
   Serial.begin(115200);
-  Serial.println();
   pinMode(FAN_PIN, OUTPUT);
   pinMode(COMP_PIN, OUTPUT);
   fan_off(); comp_off();
@@ -315,19 +216,14 @@ void setup(){
   historyInit();
 
   if (!loadConfig()){
-    airSetpoint = 30.0; compShutdownTemp = 60.0; hysteresis = 0.5; delaySeconds = 120; heatingMode = false; systemEnabled = true;
-    cfg.airSetpoint = airSetpoint; cfg.compShutdownTemp = compShutdownTemp; cfg.hysteresis = hysteresis; cfg.delaySeconds = delaySeconds; cfg.heatingMode = heatingMode?1:0; cfg.systemEnabled = systemEnabled?1:0;
+    airSetpoint=30; compShutdownTemp=60; hysteresis=0.5; delaySeconds=120; heatingMode=false; systemEnabled=true;
+    cfg.airSetpoint=airSetpoint; cfg.compShutdownTemp=compShutdownTemp; cfg.hysteresis=hysteresis; cfg.delaySeconds=delaySeconds; cfg.heatingMode=0; cfg.systemEnabled=1;
     saveConfig();
   }
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.print("WiFi connecting");
-  while (WiFi.status() != WL_CONNECTED){
-    delay(300);
-    Serial.print(".");
-  }
-  Serial.println("\nIP: " + WiFi.localIP().toString());
+  while (WiFi.status() != WL_CONNECTED){ delay(300); }
 
   server.on("/", handleRoot);
   server.on("/status", handleStatus);
